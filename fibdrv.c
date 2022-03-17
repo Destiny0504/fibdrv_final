@@ -116,6 +116,7 @@ static long long fib_sequence(long long k, char *buf)
     char *num1 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
     char *num2 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
     char *ans = (char *) kmalloc(sizeof(char) * 53, GFP_KERNEL);
+
     memset(num1, 0, sizeof(char) * 50);
     memset(num2, 0, sizeof(char) * 50);
 
