@@ -6,6 +6,9 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -17,26 +20,128 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 100
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
+void char_swap(char *a, char *b)
 {
-    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    long long f[k + 2];
+    *a = *a + *b;
+    *b = *a - *b;
+    *a = *a - *b;
+}
 
-    f[0] = 0;
-    f[1] = 1;
+void reverse(char *a)
+{
+    int counter = 0, len = strlen(a) - 1;
 
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
+    if (len % 2) {
+        for (; counter <= len / 2; counter++) {
+            char_swap(a + counter, a + len - counter);
+        }
+    } else {
+        for (; counter < len / 2; counter++) {
+            char_swap(a + counter, a + len - counter);
+        }
+    }
+}
+unsigned int size(char *a)
+{
+    return strlen(a);
+}
+static void string_number_add(char *a, char *b, char *out)
+{
+    char *data_a, *data_b;
+    size_t size_a, size_b;
+    int i, carry = 0;
+    int sum;
+
+    /*
+     * Make sure the string length of 'a' is always greater than
+     * the one of 'b'.
+     */
+    if (size(a) < size(b)) {
+        void *tmp = a;
+        a = b;
+        b = (char *) tmp;
     }
 
-    return f[k];
+    data_a = a;
+    data_b = b;
+
+    size_a = size(a);
+    size_b = size(b);
+
+    reverse(data_a);
+    reverse(data_b);
+
+    char buf[50 + 3];
+    memset(buf, 0, sizeof(buf));
+    /*
+     * The next two for-loop are calcuating the sum of a + b
+     */
+    for (i = 0; i < size_b; i++) {
+        sum = (data_a[i] - '0') + (data_b[i] - '0') + carry;
+        buf[i] = '0' + sum % 10;
+        carry = sum / 10;
+    }
+
+    for (i = size_b; i < size_a; i++) {
+        sum = (data_a[i] - '0') + carry;
+        buf[i] = '0' + sum % 10;
+        carry = sum / 10;
+    }
+
+    if (carry)
+        buf[i++] = '0' + carry;
+
+    buf[i] = 0;
+
+    reverse(buf);
+
+    /* Restore the original string */
+    reverse(data_a);
+    reverse(data_b);
+
+    if (out)
+        strncpy(out, buf, 53);
+}
+
+static long long fib_sequence(long long k, char *buf)
+{
+    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
+    char *num1 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
+    char *num2 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
+    char *ans = (char *) kmalloc(sizeof(char) * 53, GFP_KERNEL);
+    memset(num1, 0, sizeof(char) * 50);
+    memset(num2, 0, sizeof(char) * 50);
+
+    num1[0] = '0';
+    num2[0] = '1';
+
+    if (k)
+        _copy_to_user(buf, num2, size(num2));
+    else
+        _copy_to_user(buf, num1, size(num1));
+
+    for (int i = 2; i <= k; i++) {
+        memset(ans, 0, sizeof(char) * 50);
+        string_number_add(num1, num2, ans);
+        strncpy(num1, num2, 50);
+        strncpy(num2, ans, 50);
+        if (size(ans) > 15) {
+            printk("%s and %d", ans, size(ans));
+        }
+    }
+    kfree(num1);
+    kfree(num2);
+    // printk("%ld", _copy_to_user(buf, ans, size(ans)));
+    _copy_to_user(buf, ans, size(ans));
+    kfree(ans);
+    return 1;
 }
 
 static int fib_open(struct inode *inode, struct file *file)
@@ -60,7 +165,7 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    return (ssize_t) fib_sequence(*offset, buf);
 }
 
 /* write operation is skipped */
