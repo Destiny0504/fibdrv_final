@@ -132,13 +132,9 @@ static long long fib_sequence(long long k, char *buf)
         string_number_add(num1, num2, ans);
         strncpy(num1, num2, 50);
         strncpy(num2, ans, 50);
-        if (size(ans) > 15) {
-            printk("%s and %d", ans, size(ans));
-        }
     }
     kfree(num1);
     kfree(num2);
-    // printk("%ld", _copy_to_user(buf, ans, size(ans)));
     _copy_to_user(buf, ans, size(ans));
     kfree(ans);
     return 1;
