@@ -4,6 +4,7 @@
 #include <linux/init.h>
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -20,7 +21,13 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 100
+#define MAX_LENGTH 100000
+#define MAX(a, b)          \
+    ({                     \
+        typeof(a) _a = a;  \
+        typeof(b) _b = b;  \
+        _a > _b ? _a : _b; \
+    })
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
@@ -48,13 +55,10 @@ void reverse(char *a)
         }
     }
 }
-unsigned int size(char *a)
+
+char *string_number_add(char *a, char *b, char *out)
 {
-    return strlen(a);
-}
-static void string_number_add(char *a, char *b, char *out)
-{
-    char *data_a, *data_b;
+    char *data_a, *data_b, *buf;
     size_t size_a, size_b;
     int i, carry = 0;
     int sum;
@@ -63,23 +67,23 @@ static void string_number_add(char *a, char *b, char *out)
      * Make sure the string length of 'a' is always greater than
      * the one of 'b'.
      */
-    if (size(a) < size(b)) {
+    if (strlen(a) < strlen(b)) {
         void *tmp = a;
         a = b;
         b = (char *) tmp;
     }
 
+    size_a = strlen(a);
+    size_b = strlen(b);
+
     data_a = a;
     data_b = b;
-
-    size_a = size(a);
-    size_b = size(b);
+    buf = (char *) kmalloc(sizeof(char) * size_a + 1, GFP_KERNEL);
 
     reverse(data_a);
     reverse(data_b);
 
-    char buf[50 + 3];
-    memset(buf, 0, sizeof(buf));
+    memset(buf, 0, sizeof(char) * strlen(buf) + 1);
     /*
      * The next two for-loop are calcuating the sum of a + b
      */
@@ -95,50 +99,115 @@ static void string_number_add(char *a, char *b, char *out)
         carry = sum / 10;
     }
 
-    if (carry)
-        buf[i++] = '0' + carry;
-
-    buf[i] = 0;
+    if (carry) {
+        // allocate a extra byte for 'carry'
+        buf = (char *) krealloc(buf, sizeof(char) * size_a + 2, GFP_KERNEL);
+        out = (char *) krealloc(out, sizeof(char) * size_a + 2, GFP_KERNEL);
+        buf[i] = '0' + carry;
+        i++;
+    }
+    // printk("Variable i : %d\n", i);
 
     reverse(buf);
+    buf[i] = 0;
 
     /* Restore the original string */
     reverse(data_a);
     reverse(data_b);
 
-    if (out)
-        strncpy(out, buf, 53);
+    if (out) {
+        memmove(out, buf, strlen(buf) + 1);
+    }
+    kfree(buf);
+    return out;
 }
+// multiplication
+// char *string_number_mul(char *a, char *b, char *out)
+// {
+//     size_t size_a = strlen(a), size_b = strlen(b);
+//     int i = 0, j = 0, carry;
+//     unsigned short *buf = (unsigned short *) kmalloc(
+//         sizeof(short) * (size_a * size_b + 1), GFP_KERNEL);
+//     char *result =
+//         (char *) kmalloc(sizeof(char) * (size_a * size_b + 1), GFP_KERNEL);
+//     memset(buf, 0, sizeof(short) * (size_a * size_b + 1));
+//     memset(result, 0, sizeof(char) * (size_a * size_b + 1));
+//     for (; i < size_a; i++) {
+//         carry = 0;
+//         for (j = 0; j < size_b; j++) {
+//             *(buf + i + j) +=
+//                 ((*(a + i) - '0') * (*(b + j) - '0') + carry) % 10;
+//             carry = ((*(a + i) - '0') * (*(b + j) - '0') + carry) / 10;
+//         }
+//         *(buf + i + j) += carry;
+//     }
+//     if (!carry) {
+//         *(buf + i + j) = carry;
+//         carry = 0;
+//     }
 
+//     for (i = 0; *(buf + i) != 0 || carry != 0; i++) {
+//         *(result + i) = (*(buf + i) + carry) % 10 + '0';
+//         carry = (*(buf + i) + carry) / 10;
+//     }
+
+//     kfree(buf);
+//     return result;
+// }
 static long long fib_sequence(long long k, char *buf)
 {
     /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    char *num1 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
-    char *num2 = (char *) kmalloc(sizeof(char) * 50, GFP_KERNEL);
-    char *ans = (char *) kmalloc(sizeof(char) * 53, GFP_KERNEL);
-    memset(num1, 0, sizeof(char) * 50);
-    memset(num2, 0, sizeof(char) * 50);
+    ktime_t kt;
+    ssize_t retval = 0;
+    char *num1 = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
+    char *num2 = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
+    char *ans = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
+    memset(num1, 0, sizeof(char) * 2);
+    memset(num2, 0, sizeof(char) * 2);
 
     num1[0] = '0';
     num2[0] = '1';
 
     if (k)
-        _copy_to_user(buf, num2, size(num2));
+        memmove(ans, num2, 2);
     else
-        _copy_to_user(buf, num1, size(num1));
+        memmove(ans, num1, 2);
 
     for (int i = 2; i <= k; i++) {
-        memset(ans, 0, sizeof(char) * 50);
-        string_number_add(num1, num2, ans);
-        strncpy(num1, num2, 50);
-        strncpy(num2, ans, 50);
+        printk("Fib : %d\n", i);
+        memset(ans, 0, sizeof(char) * strlen(ans) + 1);
+        ans = string_number_add(num1, num2, ans);
+
+        num1 = (char *) krealloc(num1, sizeof(char) * strlen(num2) + 1,
+                                 GFP_KERNEL);
+        if (!num1)
+            return -1;
+        memmove(num1, num2, strlen(num2) + 1);
+
+        num2 =
+            (char *) krealloc(num2, sizeof(char) * strlen(ans) + 1, GFP_KERNEL);
+        if (!num2)
+            return -1;
+        memmove(num2, ans, strlen(ans) + 1);
     }
+
     kfree(num1);
     kfree(num2);
-    _copy_to_user(buf, ans, size(ans));
+    kt = ktime_get();  // the time that copy started
+    retval = _copy_to_user(buf, ans, strlen(ans) + 1);
+    kt = ktime_sub(ktime_get(), kt);  // the time that copy finished
     kfree(ans);
-    return 1;
+
+    // EFAULT means bad address
+    if (retval < 0)
+        return EFAULT;
+    return (long long) ktime_to_ns(kt);
 }
+
+// static long long fib_fast_doubling(long long k, char *buf)
+// {
+//     return -1;
+// }
 
 static int fib_open(struct inode *inode, struct file *file)
 {
@@ -161,9 +230,12 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset, buf);
+    ktime_t kt;
+    kt = ktime_get();  // start calculating fib sequence
+    fib_sequence(*offset, buf);
+    kt = ktime_sub(ktime_get(), kt);  // finish calculating fib sequence
+    return (ssize_t) ktime_to_us(kt);
 }
-
 /* write operation is skipped */
 static ssize_t fib_write(struct file *file,
                          const char *buf,
