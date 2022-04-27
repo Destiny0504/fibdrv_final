@@ -56,7 +56,7 @@ void reverse(char *a)
     }
 }
 
-char *string_number_add(char *a, char *b, char *out)
+char *string_number_add(char *a, char *b)
 {
     char *data_a, *data_b, *buf;
     size_t size_a, size_b;
@@ -78,12 +78,12 @@ char *string_number_add(char *a, char *b, char *out)
 
     data_a = a;
     data_b = b;
-    buf = (char *) kmalloc(sizeof(char) * size_a + 1, GFP_KERNEL);
+    buf = (char *) kmalloc(size_a + 2, GFP_KERNEL);
 
     reverse(data_a);
     reverse(data_b);
 
-    memset(buf, 0, sizeof(char) * strlen(buf) + 1);
+    memset(buf, 0, size_a + 2);
     /*
      * The next two for-loop are calcuating the sum of a + b
      */
@@ -99,61 +99,71 @@ char *string_number_add(char *a, char *b, char *out)
         carry = sum / 10;
     }
 
-    if (carry) {
-        // allocate a extra byte for 'carry'
-        buf = (char *) krealloc(buf, sizeof(char) * size_a + 2, GFP_KERNEL);
-        out = (char *) krealloc(out, sizeof(char) * size_a + 2, GFP_KERNEL);
-        buf[i] = '0' + carry;
-        i++;
-    }
+    if (carry)
+        *(buf + i) = '0' + carry;
     // printk("Variable i : %d\n", i);
 
-    reverse(buf);
-    buf[i] = 0;
+    buf = krealloc(buf, strlen(buf) + 1, GFP_KERNEL);
 
+    reverse(buf);
     /* Restore the original string */
     reverse(data_a);
     reverse(data_b);
 
-    if (out) {
-        memmove(out, buf, strlen(buf) + 1);
-    }
-    kfree(buf);
-    return out;
+    return buf;
 }
 // multiplication
-// char *string_number_mul(char *a, char *b, char *out)
-// {
-//     size_t size_a = strlen(a), size_b = strlen(b);
-//     int i = 0, j = 0, carry;
-//     unsigned short *buf = (unsigned short *) kmalloc(
-//         sizeof(short) * (size_a * size_b + 1), GFP_KERNEL);
-//     char *result =
-//         (char *) kmalloc(sizeof(char) * (size_a * size_b + 1), GFP_KERNEL);
-//     memset(buf, 0, sizeof(short) * (size_a * size_b + 1));
-//     memset(result, 0, sizeof(char) * (size_a * size_b + 1));
-//     for (; i < size_a; i++) {
-//         carry = 0;
-//         for (j = 0; j < size_b; j++) {
-//             *(buf + i + j) +=
-//                 ((*(a + i) - '0') * (*(b + j) - '0') + carry) % 10;
-//             carry = ((*(a + i) - '0') * (*(b + j) - '0') + carry) / 10;
-//         }
-//         *(buf + i + j) += carry;
-//     }
-//     if (!carry) {
-//         *(buf + i + j) = carry;
-//         carry = 0;
-//     }
+char *string_number_mul(char *a, char *b)
+{
+    size_t size_a = strlen(a), size_b = strlen(b);
+    int i = 0, j, carry;
+    unsigned short *buf = (unsigned short *) kmalloc(
+        sizeof(short) * (size_a + size_b + 4), GFP_KERNEL);
+    char *result = (char *) kmalloc(size_a + size_b + 4, GFP_KERNEL);
+    memset(buf, 0, sizeof(short) * (size_a + size_b + 4));
+    memset(result, 0, size_a + size_b + 4);
 
-//     for (i = 0; *(buf + i) != 0 || carry != 0; i++) {
-//         *(result + i) = (*(buf + i) + carry) % 10 + '0';
-//         carry = (*(buf + i) + carry) / 10;
-//     }
+    reverse(a);
+    if (strcmp(a, b) != 0) {
+        reverse(b);
+    }
 
-//     kfree(buf);
-//     return result;
-// }
+    for (; i < size_a; i++) {
+        for (j = 0; j < size_b; j++) {
+            *(buf + i + j) +=
+                ((*(a + i) - '0') * (*(b + j) - '0') + carry) % 10;
+            carry = ((*(a + i) - '0') * (*(b + j) - '0') + carry) / 10;
+        }
+        *(buf + i + j) += carry;
+        carry = 0;
+    }
+
+    carry = 0;
+
+    for (i = 0; i < size_a + size_b; i++) {
+        *(result + i) = (*(buf + i) + carry) % 10 + '0';
+        carry = (*(buf + i) + carry) / 10;
+    }
+    for (i = size_a + size_b - 1; *(result + i) == '0' && i > 0; i--)
+        *(result + i) = 0;
+
+    reverse(a);
+    if (strcmp(a, b) != 0) {
+        reverse(b);
+    }
+    reverse(result);
+
+
+    if (strlen(result) < 1) {
+        *result = '0';
+    }
+
+    result = (char *) krealloc(result, strlen(result) + 1, GFP_KERNEL);
+
+    kfree(buf);
+    return result;
+}
+
 static long long fib_sequence(long long k, char *buf)
 {
     /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
@@ -175,19 +185,13 @@ static long long fib_sequence(long long k, char *buf)
 
     for (int i = 2; i <= k; i++) {
         printk("Fib : %d\n", i);
-        memset(ans, 0, sizeof(char) * strlen(ans) + 1);
-        ans = string_number_add(num1, num2, ans);
+        kfree(ans);
+        ans = string_number_add(num1, num2);
 
-        num1 = (char *) krealloc(num1, sizeof(char) * strlen(num2) + 1,
-                                 GFP_KERNEL);
-        if (!num1)
-            return -1;
-        memmove(num1, num2, strlen(num2) + 1);
+        kfree(num1);
 
-        num2 =
-            (char *) krealloc(num2, sizeof(char) * strlen(ans) + 1, GFP_KERNEL);
-        if (!num2)
-            return -1;
+        num1 = num2;
+        num2 = (char *) kmalloc(strlen(ans) + 1, GFP_KERNEL);
         memmove(num2, ans, strlen(ans) + 1);
     }
 
@@ -204,10 +208,104 @@ static long long fib_sequence(long long k, char *buf)
     return (long long) ktime_to_ns(kt);
 }
 
-// static long long fib_fast_doubling(long long k, char *buf)
-// {
-//     return -1;
-// }
+
+char *string_number_min(char *a, char *b)
+{
+    size_t size_a = strlen(a), size_b = strlen(b);
+    int i = 0, carry = 0;
+    char *buf = (char *) kmalloc(size_a + 1, GFP_KERNEL);
+    memset(buf, 0, size_a + 1);
+
+    reverse(a);
+    reverse(b);
+
+    for (; i < size_b; i++) {
+        if (((*(a + i) - '0') - (*(b + i) - '0') + carry) < 0) {
+            *(buf + i) = *(a + i) - *(b + i) + '0' + carry + 10;
+            carry = -1;
+        } else {
+            *(buf + i) = *(a + i) - *(b + i) + '0' + carry;
+            carry = 0;
+        }
+    }
+
+    for (; i < size_a; i++) {
+        if (((*(a + i) - '0') + carry) < 0) {
+            *(buf + i) = *(a + i) + carry + 10;
+            carry = -1;
+        } else {
+            *(buf + i) = *(a + i) + carry;
+            carry = 0;
+        }
+    }
+
+    // remove the leading zero
+    if (*(buf + i - 1) == '0' && strlen(buf) > 1)
+        *(buf + i - 1) = 0;
+
+    reverse(a);
+    reverse(b);
+    reverse(buf);
+
+    buf = (char *) krealloc(buf, strlen(buf) + 1, GFP_KERNEL);
+    return buf;
+}
+
+
+static long long fib_fast_doubling(long long k, char *buf)
+{
+    char *fib_0, *fib_1, *two = "2\0";
+    long long i;
+    ssize_t retval = 0;
+
+    fib_0 = (char *) kmalloc(2, GFP_KERNEL);
+    fib_1 = (char *) kmalloc(2, GFP_KERNEL);
+
+    memset(fib_0, 0, 2);
+    memset(fib_1, 0, 2);
+
+    *fib_0 = '0';
+    *fib_1 = '1';
+
+    // datatype long long has 64 bits
+    for (i = 1u << (64 - __builtin_clz(k)); i > 0; i >>= 1) {
+        char *a, *b, *tmp_0, *tmp_1;
+        // calcualting a
+        tmp_0 = string_number_mul(two, fib_1);
+        tmp_1 = string_number_min(tmp_0, fib_0);
+        a = string_number_mul(tmp_1, fib_0);
+        kfree(tmp_0);
+        kfree(tmp_1);
+
+        // calculating b
+        tmp_0 = string_number_mul(fib_0, fib_0);
+        tmp_1 = string_number_mul(fib_1, fib_1);
+        b = string_number_add(tmp_0, tmp_1);
+        kfree(tmp_0);
+        kfree(tmp_1);
+
+        kfree(fib_0);
+        kfree(fib_1);
+        if (i & k) {
+            fib_0 = (char *) kmalloc(strlen(b) + 1, GFP_KERNEL);
+            memmove(fib_0, b, strlen(b) + 1);
+            fib_1 = string_number_add(a, b);
+        } else {
+            fib_0 = (char *) kmalloc(strlen(a) + 1, GFP_KERNEL);
+            fib_1 = (char *) kmalloc(strlen(b) + 1, GFP_KERNEL);
+            memmove(fib_0, a, strlen(a) + 1);
+            memmove(fib_1, b, strlen(b) + 1);
+        }
+        kfree(a);
+        kfree(b);
+    }
+    kfree(fib_1);
+    retval = _copy_to_user(buf, fib_0, strlen(fib_0) + 1);
+    kfree(fib_0);
+    if (retval < 0)
+        return EFAULT;
+    return 0;
+}
 
 static int fib_open(struct inode *inode, struct file *file)
 {
@@ -233,6 +331,7 @@ static ssize_t fib_read(struct file *file,
     ktime_t kt;
     kt = ktime_get();  // start calculating fib sequence
     fib_sequence(*offset, buf);
+    fib_fast_doubling(*offset, buf);
     kt = ktime_sub(ktime_get(), kt);  // finish calculating fib sequence
     return (ssize_t) ktime_to_us(kt);
 }
