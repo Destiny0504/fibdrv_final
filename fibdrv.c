@@ -1,4 +1,5 @@
 #include <linux/cdev.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -7,9 +8,13 @@
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+
+#include "fibdrv.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -30,8 +35,11 @@ MODULE_VERSION("0.1");
     })
 
 static dev_t fib_dev = 0;
-static struct cdev *fib_cdev;
+static spinlock_t fib_lock;
+static struct cdev *fib_cdev;  // character device
 static struct class *fib_class;
+static struct workqueue_struct *fibdrv_wq;  // the workqueue for fib driver
+static struct list_head supervisor;         // maintain the list of kfib
 static DEFINE_MUTEX(fib_mutex);
 
 void char_swap(char *a, char *b)
@@ -62,7 +70,6 @@ char *string_number_add(char *a, char *b)
     size_t size_a, size_b;
     int i, carry = 0;
     int sum;
-
     /*
      * Make sure the string length of 'a' is always greater than
      * the one of 'b'.
@@ -117,11 +124,9 @@ char *string_number_mul(char *a, char *b)
 {
     size_t size_a = strlen(a), size_b = strlen(b);
     int i = 0, j, carry;
-    unsigned short *buf = (unsigned short *) kmalloc(
+    unsigned short *buf = (unsigned short *) kzalloc(
         sizeof(short) * (size_a + size_b + 4), GFP_KERNEL);
-    char *result = (char *) kmalloc(size_a + size_b + 4, GFP_KERNEL);
-    memset(buf, 0, sizeof(short) * (size_a + size_b + 4));
-    memset(result, 0, size_a + size_b + 4);
+    char *result = (char *) kzalloc(size_a + size_b + 4, GFP_KERNEL);
 
     reverse(a);
     if (strcmp(a, b) != 0) {
@@ -169,11 +174,9 @@ static long long fib_sequence(long long k, char *buf)
     /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
     ktime_t kt;
     ssize_t retval = 0;
-    char *num1 = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
-    char *num2 = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
+    char *num1 = (char *) kzalloc(sizeof(char) * 2, GFP_KERNEL);
+    char *num2 = (char *) kzalloc(sizeof(char) * 2, GFP_KERNEL);
     char *ans = (char *) kmalloc(sizeof(char) * 2, GFP_KERNEL);
-    memset(num1, 0, sizeof(char) * 2);
-    memset(num2, 0, sizeof(char) * 2);
 
     num1[0] = '0';
     num2[0] = '1';
@@ -198,7 +201,7 @@ static long long fib_sequence(long long k, char *buf)
     kfree(num1);
     kfree(num2);
     kt = ktime_get();  // the time that copy started
-    retval = _copy_to_user(buf, ans, strlen(ans) + 1);
+    retval = copy_to_user(buf, ans, strlen(ans) + 1);
     kt = ktime_sub(ktime_get(), kt);  // the time that copy finished
     kfree(ans);
 
@@ -300,8 +303,12 @@ static long long fib_fast_doubling(long long k, char *buf)
         kfree(b);
     }
     kfree(fib_1);
-    retval = _copy_to_user(buf, fib_0, strlen(fib_0) + 1);
+    if (strlen(fib_0) |
+        ((int) ((20898764025 * k - 34948500216) / 100000000000) + 1)) {
+        retval = copy_to_user(buf, fib_0, strlen(fib_0) + 1);
+    }
     kfree(fib_0);
+    printk("retern val : %lu", retval);
     if (retval < 0)
         return EFAULT;
     return 0;
@@ -309,17 +316,37 @@ static long long fib_fast_doubling(long long k, char *buf)
 
 static int fib_open(struct inode *inode, struct file *file)
 {
-    if (!mutex_trylock(&fib_mutex)) {
-        printk(KERN_ALERT "fibdrv is in use");
-        return -EBUSY;
-    }
     return 0;
 }
 
 static int fib_release(struct inode *inode, struct file *file)
 {
-    mutex_unlock(&fib_mutex);
     return 0;
+}
+
+/* work function*/
+void work_fn(struct work_struct *work)
+{
+    struct kfib *worker = container_of(work, struct kfib, fib_work);
+
+    printk(KERN_INFO "Executing Workqueue Function\n");
+    fib_fast_doubling(worker->offset, worker->buffer);
+    kfree(worker);
+}
+
+static struct work_struct *create_work(long long data, char *buf)
+{
+    struct kfib *work;
+
+    if (!(work = kmalloc(sizeof(struct kfib), GFP_KERNEL)))
+        return NULL;
+
+    work->offset = data;
+    work->buffer = buf;
+
+    INIT_WORK(&work->fib_work, work_fn);
+
+    return &work->fib_work;
 }
 
 /* calculate the fibonacci number at given offset */
@@ -328,12 +355,56 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    ktime_t kt;
-    kt = ktime_get();  // start calculating fib sequence
-    fib_sequence(*offset, buf);
-    fib_fast_doubling(*offset, buf);
-    kt = ktime_sub(ktime_get(), kt);  // finish calculating fib sequence
-    return (ssize_t) ktime_to_us(kt);
+    // ktime_t kt;
+    // // ssize_t retval = 0;
+    // char *test_copy = (char *) kmalloc(size, GFP_KERNEL);
+    // memset(test_copy, '1', *offset);
+    // *(test_copy + *offset - 1) = 0;
+    // kt = ktime_get();  // start calculating fib sequence
+    // fib_sequence(*offset, buf);
+    // fib_fast_doubling(*offset, buf);
+    // // if (access_ok(buf, *offset))
+    // //     retval = _copy_to_user(buf, test_copy, *offset);
+    // kt = ktime_sub(ktime_get(), kt);  // finish calculating fib sequence
+    // kfree(test_copy);
+    // return (ssize_t) ktime_to_ns(kt);
+
+    /* for work queue testing */
+    struct work_struct *work = NULL;
+    struct fib_worker *l, *tar;
+    int pid = task_pid_nr(current);
+    long long tmp = -1;
+    list_for_each_entry_safe (tar, l, &supervisor, list) {
+        if (unlikely(tar->pid == pid)) {
+            tmp = tar->offset;
+            printk("Thread %ld, target %d, its pid = %d", size, tar->offset,
+                   tar->pid);
+            spin_lock_irq(&fib_lock);
+            __list_del_entry(&tar->list);
+            spin_unlock_irq(&fib_lock);
+            kfree(tar);
+            break;
+        }
+    }
+    if (unlikely(tmp < 0)) {
+        printk(KERN_ALERT "Didn't assign the value for reading.");
+        return -1;
+    }
+    // printk("start work %lld", tmp);
+    while (1) {
+        if (unlikely(!(work = create_work(tmp, buf)))) {
+            printk(KERN_ERR DEV_FIBONACCI_NAME
+                   ": can't create work\nstart a next try");
+            continue;
+        }
+        printk("%s", queue_work(fibdrv_wq, work) ? "true" : "false");
+        // flush_work(work);
+        // mdelay(200);
+        printk("finish work %lld", tmp);
+        return -1;
+    }
+    // if (retval < 0)
+    //     return -1;
 }
 /* write operation is skipped */
 static ssize_t fib_write(struct file *file,
@@ -341,12 +412,29 @@ static ssize_t fib_write(struct file *file,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    ssize_t retval = 0;
+    ktime_t kt;
+    char *test_copy = (char *) kmalloc(size, GFP_KERNEL);
+    kt = ktime_get();
+    if (access_ok(buf, size))
+        retval = _copy_from_user(test_copy, buf, size);
+
+    kt = ktime_sub(ktime_get(), kt);
+    printk("%ld", strlen(test_copy));
+    kfree(test_copy);
+
+    if (retval < 0)
+        return -1;
+    return (ssize_t) ktime_to_ns(kt);
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
 {
     loff_t new_pos = 0;
+    struct fib_worker *work;
+    struct fib_worker *l, *tar;
+    work = kzalloc(sizeof(struct fib_worker), GFP_KERNEL);
+
     switch (orig) {
     case 0: /* SEEK_SET: */
         new_pos = offset;
@@ -364,7 +452,30 @@ static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
     if (new_pos < 0)
         new_pos = 0;        // min case
     file->f_pos = new_pos;  // This is what we'll use now
+
+    work->pid = task_pid_nr(current);
+    work->offset = new_pos;
+    list_for_each_entry_safe (tar, l, &supervisor, list) {
+        printk("Entry in supervisor %d, its pid = %d", tar->offset, tar->pid);
+        if (work->pid == tar->pid) {
+            printk(KERN_ALERT
+                   "There is a value assigned before. Please read it first");
+            kfree(work);
+            return -1;
+        }
+    }
+    spin_lock_irq(&fib_lock);
+    list_add_tail(&work->list, &supervisor);
+    spin_unlock_irq(&fib_lock);
+    printk("Add pid : %d, target : %d", work->pid, work->offset);
     return new_pos;
+}
+static void free_worker(void)
+{
+    struct fib_worker *l, *tar;
+    list_for_each_entry_safe (tar, l, &supervisor, list) {
+        kfree(tar);
+    }
 }
 
 const struct file_operations fib_fops = {
@@ -381,6 +492,8 @@ static int __init init_fib_dev(void)
     int rc = 0;
 
     mutex_init(&fib_mutex);
+    INIT_LIST_HEAD(&supervisor);
+    spin_lock_init(&fib_lock);
 
     // Let's register the device
     // This will dynamically allocate the major number
@@ -421,6 +534,12 @@ static int __init init_fib_dev(void)
         rc = -4;
         goto failed_device_create;
     }
+    fibdrv_wq = alloc_workqueue(DEV_FIBONACCI_NAME, 0, 0);
+    if (!fibdrv_wq) {
+        printk("Failed to create workqueue");
+        rc = -ENOMEM;
+        goto failed_cworkqueue;
+    }
     return rc;
 failed_device_create:
     class_destroy(fib_class);
@@ -428,6 +547,8 @@ failed_class_create:
     cdev_del(fib_cdev);
 failed_cdev:
     unregister_chrdev_region(fib_dev, 1);
+failed_cworkqueue:
+    destroy_workqueue(fibdrv_wq);
     return rc;
 }
 
@@ -438,6 +559,8 @@ static void __exit exit_fib_dev(void)
     class_destroy(fib_class);
     cdev_del(fib_cdev);
     unregister_chrdev_region(fib_dev, 1);
+    free_worker();  // free the whole list
+    destroy_workqueue(fibdrv_wq);
 }
 
 module_init(init_fib_dev);
